@@ -2,8 +2,21 @@ package Logic
 
 import (
 	"MapReduce_v0.1/Kernel/Message"
+	"log"
+	"math/rand"
 	"time"
 )
+
+type Master struct {
+	works          map[int]*Work
+	slaves         []*Slave
+	idleSlaves     []int
+	unMapNum       int // 无法从事map任务的节点数量，如果全部都在从事reduce节点，那么需要从某些reduce节点中调走一些从事map任务
+	timer          <-chan time.Time
+	timerEvents    []timerEvent
+	fromBottomChan <-chan Message.Message
+	toBottomChan   chan<- Message.Message
+}
 
 const (
 	Map int = iota
@@ -12,108 +25,181 @@ const (
 	Dead
 )
 
-type Master struct {
-	slaves         []slave
-	idleSlaves     []int
-	tasks          map[int][]task
-	mapTasks       map[int]map[int]bool // 还没开始的map任务
-	reduceTasks    map[int]map[int]bool // 还没开始的reduce任务
-	runningTasks   map[int]map[int]int  // 还在运行的任务
-	fromBottomChan <-chan Message.Message
-	toBottomChan   chan<- Message.Message
-	timerChan      chan int
+const (
+	Untreated int = iota
+	Running
+	Finished
+)
+
+type timerEvent struct {
+	timestamp time.Duration
+	wid       int
+	tid       int
 }
 
-/*
-存储所有从节点信息，这里可以不用维护IP，我觉得可以在网络层维护
-这里主要存储这个节点的定时信息，正在执行的任务信息，以及这个节点的状态
-*/
-
-type slave struct {
-	id     int              // 从节点的Id
-	state  int              // slave所处的状态
-	taskId int              // 这个节点所执行的节点的Id
-	timer  <-chan time.Time // 计时信息
+type Work struct {
+	wid                  int     // 作业号
+	tasks                []*Task // 作业中的任务
+	mapNum               int     // 还未完成的map任务数量
+	reduceNum            int     // 还未完成的reduce任务数量
+	finishedMapSlaves    []int   // 处理完map任务的slave节点（这些节点会保留一些数据供后续的Map使用）
+	finishedReduceSlaves []int   // 处理完map任务的slave节点（这些节点会保留一些数据供后续的Map使用）
 }
 
-/*
-任务封装，里面应该是一个string -> kv的函数或者 kv -> kv的函数
-同时还应有一个输入数据
-同时还有一个Hash函数，负责计算标识产出的key应该放在内存的位置
-*/
-
-type task struct {
-	pid      int           // 集合任务ID
-	id       int           // 任务ID
-	taskType int           // 任务类型
-	slaveId  int           // 执行的slave节点编号
-	data     string        // 任务所需数据文件存放位置（map任务）
-	hashCode int           // 任务所需要的摄取的hash码（reduce任务）
-	timeout  time.Duration // 到期时间
+type Task struct {
+	wid      int           // 作业号
+	tid      int           // 任务号
+	state    int           // 作业执行的状态
+	sid      int           // 正在执行该任务的slave编号
+	kind     int           // 任务种类
+	execPath string        // 执行文件位置
+	dataPath string        // 数据位置（kind = map时有效）
+	hashCode int           // 获取哈希码（kind = reduce时有效）
+	timeout  time.Duration //超时时间
 }
 
-func (m *Master) init() {
-
+type Slave struct {
+	id        int             // slave号
+	state     int             // slave状态
+	wid       int             // slave执行的作业号
+	tid       int             // 该slave执行的任务号
+	timestamp int             // 最后一次收到该slave回复的时间戳
+	lastMsg   Message.Message // master最后发给该slave的消息
 }
 
-func (m *Master) processFinishedMap(tpid int, tid int, sid int) { // 处理完成的Map任务
-	// 解绑slave节点
-	m.slaves[sid].state, m.slaves[sid].taskId = Idle, -1
+func (m *Master) processMapFinished(wid, tid, sid, timestamp int) {
+	m.slaves[sid].state = Idle
+	m.slaves[sid].wid = -1
+	m.slaves[sid].tid = -1
+	m.slaves[sid].timestamp = timestamp
 	m.idleSlaves = append(m.idleSlaves, sid)
-	if ts, has := m.runningTasks[tpid]; !has { // 如果该项目已经完成，放弃返回
-		return
-	} else if s, has := ts[tid]; !has { // 如果该任务已经完成，放弃返回
-		return
-	} else if s != sid { // 如果该任务的slave不再是这个slave，放弃返回
+	m.unMapNum--
+	work := m.works[wid]
+	task := work.tasks[tid]
+	if task.kind != Map {
+		panic("processMapFinished: it's not a map task")
+	}
+	if task.state != Running || task.sid != sid {
 		return
 	}
-	// 否则这个任务已经完成
-	delete(m.runningTasks[tpid], tid)
-	if len(m.mapTasks[tpid]) == 0 { // 所有的Map任务都已经完成了
-		for v, _ := range m.reduceTasks[tpid] {
-			m.publishReduce(m.tasks[tpid][v])
-		}
-	} else {
-		for v, _ := range m.mapTasks[tpid] {
-			m.publishMap(m.tasks[tpid][v])
-			break
+	task.state = Finished
+	work.mapNum--
+	work.finishedMapSlaves = append(work.finishedMapSlaves, sid)
+	for _, v := range work.tasks {
+		if v.kind == Reduce && v.state == Running {
+			// 发送一个需要增加处理一个节点数据的信息的消息
 		}
 	}
+	if work.mapNum == 0 {
+		// 通知所有正处理该作业Reduce的节点，可以返回，这则消息需要带着所有数据
+		// 增加定时任务
+	}
+	m.schedule()
 }
 
-func (m *Master) publishReduce(t task) {
-
-}
-
-func (m *Master) publishMap(t task) {
-
-}
-
-func (m *Master) processFinishedReduce(tpid int, tid int, sid int) { // 处理完成的Reduce任务
-	m.slaves[sid].state, m.slaves[sid].taskId = Idle, -1
+func (m *Master) processReduceFinished(wid, tid, sid, timestamp int) {
+	m.slaves[sid].state = Idle
+	m.slaves[sid].wid = -1
+	m.slaves[sid].tid = -1
+	m.slaves[sid].timestamp = timestamp
 	m.idleSlaves = append(m.idleSlaves, sid)
-	if ts, has := m.runningTasks[tpid]; !has { // 如果该项目已经完成，放弃返回
-		return
-	} else if s, has := ts[tid]; !has { // 如果该任务已经完成，放弃返回
-		return
-	} else if s != sid { // 如果该任务的slave不再是这个slave，放弃返回
+	m.unMapNum--
+	work := m.works[wid]
+	task := work.tasks[tid]
+	if task.kind != Reduce {
+		panic("processMapFinished: it's not a reduce task")
+	}
+	if task.state != Running || task.sid != sid {
 		return
 	}
-	// 否则这个任务已经完成
-	delete(m.runningTasks[tpid], tid)
-	if len(m.runningTasks[tpid]) == 0 { // 所有的Reduce任务都已经完成了
-
+	task.state = Finished
+	work.reduceNum--
+	work.finishedReduceSlaves = append(work.finishedReduceSlaves, sid)
+	if work.reduceNum == 0 {
+		// 该任务结束，信息数据都保存在finishedReduceSlaves这些节点的磁盘文件中
+		for _, v := range work.tasks {
+			if m.slaves[v.sid].state == Running && m.slaves[v.sid].wid == wid {
+				m.slaves[v.sid].state = Dead
+			}
+		}
+		delete(m.works, wid)
 	}
+	m.schedule()
 }
 
-func (m *Master) processTimeout(tid int) { // 处理超时的任务
-
+func (m *Master) processTimeout(wid, tid int) {
+	work := m.works[wid]
+	task := work.tasks[tid]
+	sid := task.sid
+	m.slaves[sid].state = Dead
+	m.slaves[sid].wid = -1
+	m.slaves[sid].tid = -1
+	task.state = Untreated
+	task.sid = -1
+	m.unMapNum++
+	if len(m.slaves) == m.unMapNum { // 必须剥夺一个reduce节点的执行
+		idx := -1
+		rand.Seed(time.Now().UnixNano())
+		for i := 0; i < 10000; i++ {
+			idx = rand.Intn(len(m.slaves))
+			if m.slaves[idx].state == Running {
+				break
+			}
+		}
+		if idx == -1 {
+			log.Println("Master warning: maybe no alive slaves")
+		} else {
+			m.slaves[idx].state = Idle
+			m.slaves[idx].tid = -1
+			m.idleSlaves = append(m.idleSlaves, idx)
+			m.unMapNum--
+		}
+	}
+	m.schedule()
 }
 
-/*
-新建任务，包括希望划分的Map任务数量、洗牌阶段的hash函数，以及map函数，reduce函数。
-*/
+func (m *Master) schedule() int {
+	for _, work := range m.works {
+		for _, task := range work.tasks {
+			if task.state == Untreated {
+				if len(m.idleSlaves) > 0 {
+					if task.kind == Reduce && m.unMapNum < len(m.slaves)-1 { // 不会让所有的slave节点都处于reduce状态，必须至少存活一个可以map的节点
+						m.unMapNum++
+					} else if task.kind == Reduce {
+						break
+					} else if task.kind == Map {
+						// 增加定时任务
+					}
+					sid := m.idleSlaves[0]
+					m.idleSlaves = m.idleSlaves[1:]
+					task.sid = sid
+					task.state = Running
+					// 发送一个消息给这个sid他有一个新Task要处理
+				} else {
+					return 0
+				}
+			}
+		}
+	}
+	return len(m.idleSlaves)
+}
 
-func (m *Master) processInitTask(mapN int, hashFunc string, mapFunc string, reduceFunc string) {
+func (m *Master) Run() {
+	for {
+		select {
+		case msg, opened := <-m.fromBottomChan:
+			if !opened {
+				panic("Master: chan closed")
+			}
+			if msg.Type == Message.Map {
+				m.processMapFinished(msg.Wid, msg.Tid, msg.From, msg.Timestamp)
+			} else if msg.Type == Message.Reduce {
+				m.processReduceFinished(msg.Wid, msg.Tid, msg.From, msg.Timestamp)
+			}
+		case <-m.timer:
 
+			m.processTimeout(m.timerEvents[0].wid, m.timerEvents[0].tid)
+			m.timerEvents = m.timerEvents[1:]
+		}
+	}
 }
