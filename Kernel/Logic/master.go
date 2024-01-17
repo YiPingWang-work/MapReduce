@@ -1,16 +1,27 @@
 package Logic
 
-import "time"
+import (
+	"MapReduce_v0.1/Kernel/Message"
+	"time"
+)
+
+const (
+	Map int = iota
+	Reduce
+	Idle
+	Dead
+)
 
 type Master struct {
-	slaves        []slave
-	idleSlaves    []int
-	tasks         []task
-	finishedTasks []int
-}
-
-type funcBytes struct {
-	content []byte // 可执行文件
+	slaves         []slave
+	idleSlaves     []int
+	tasks          map[int][]task
+	mapTasks       map[int]map[int]bool // 还没开始的map任务
+	reduceTasks    map[int]map[int]bool // 还没开始的reduce任务
+	runningTasks   map[int]map[int]int  // 还在运行的任务
+	fromBottomChan <-chan Message.Message
+	toBottomChan   chan<- Message.Message
+	timerChan      chan int
 }
 
 /*
@@ -19,10 +30,10 @@ type funcBytes struct {
 */
 
 type slave struct {
-	id        int              // 从节点的Id
-	slaveType int              // 节点的类型
-	taskId    int              // 这个节点所执行的节点的Id
-	timer     <-chan time.Time // 计时信息
+	id     int              // 从节点的Id
+	state  int              // slave所处的状态
+	taskId int              // 这个节点所执行的节点的Id
+	timer  <-chan time.Time // 计时信息
 }
 
 /*
@@ -32,52 +43,77 @@ type slave struct {
 */
 
 type task struct {
+	pid      int           // 集合任务ID
 	id       int           // 任务ID
 	taskType int           // 任务类型
 	slaveId  int           // 执行的slave节点编号
-	data     []byte        // 任务所需数据
-	hashFunc *funcBytes    // 存储的是执行函数标识
-	taskFunc *funcBytes    // 存储的是执行函数标识
+	data     string        // 任务所需数据文件存放位置（map任务）
+	hashCode int           // 任务所需要的摄取的hash码（reduce任务）
 	timeout  time.Duration // 到期时间
 }
 
-/*
-实现一个函数，对于一个任务实体，需要找到一个slave节点进行分配，并记录这则信息
-*/
+func (m *Master) init() {
 
-func (m *Master) schedule() {
+}
+
+func (m *Master) processFinishedMap(tpid int, tid int, sid int) { // 处理完成的Map任务
+	// 解绑slave节点
+	m.slaves[sid].state, m.slaves[sid].taskId = Idle, -1
+	m.idleSlaves = append(m.idleSlaves, sid)
+	if ts, has := m.runningTasks[tpid]; !has { // 如果该项目已经完成，放弃返回
+		return
+	} else if s, has := ts[tid]; !has { // 如果该任务已经完成，放弃返回
+		return
+	} else if s != sid { // 如果该任务的slave不再是这个slave，放弃返回
+		return
+	}
+	// 否则这个任务已经完成
+	delete(m.runningTasks[tpid], tid)
+	if len(m.mapTasks[tpid]) == 0 { // 所有的Map任务都已经完成了
+		for v, _ := range m.reduceTasks[tpid] {
+			m.publishReduce(m.tasks[tpid][v])
+		}
+	} else {
+		for v, _ := range m.mapTasks[tpid] {
+			m.publishMap(m.tasks[tpid][v])
+			break
+		}
+	}
+}
+
+func (m *Master) publishReduce(t task) {
+
+}
+
+func (m *Master) publishMap(t task) {
+
+}
+
+func (m *Master) processFinishedReduce(tpid int, tid int, sid int) { // 处理完成的Reduce任务
+	m.slaves[sid].state, m.slaves[sid].taskId = Idle, -1
+	m.idleSlaves = append(m.idleSlaves, sid)
+	if ts, has := m.runningTasks[tpid]; !has { // 如果该项目已经完成，放弃返回
+		return
+	} else if s, has := ts[tid]; !has { // 如果该任务已经完成，放弃返回
+		return
+	} else if s != sid { // 如果该任务的slave不再是这个slave，放弃返回
+		return
+	}
+	// 否则这个任务已经完成
+	delete(m.runningTasks[tpid], tid)
+	if len(m.runningTasks[tpid]) == 0 { // 所有的Reduce任务都已经完成了
+
+	}
+}
+
+func (m *Master) processTimeout(tid int) { // 处理超时的任务
 
 }
 
 /*
-需要实现一个节点注册与发现的函数，入股收到节点，会在这里实现注册功能
+新建任务，包括希望划分的Map任务数量、洗牌阶段的hash函数，以及map函数，reduce函数。
 */
 
-func (m *Master) register() {
-
-}
-
-/*
-重新设计，包括重新构建MapReduce任务和对任务步骤进行拆分
-*/
-
-func (m *Master) redesign() {
-
-}
-
-/*
-预同步机制，所有的Reduce节点需要得知Map节点的位置，方便进行拉取数据，每当一个Map任务完成后，master将这个Map通知所有进行Reduce任务的节点
-第一版本设计通知给所有的节点，因为每个节点都有可能承担Reduce任务
-*/
-
-func (m *Master) preReduce() {
-
-}
-
-/*
-实现一个函数，监视所有slave节点的运行状态，包括该任务是否结束，是否超时
-*/
-
-func (m *Master) run() {
+func (m *Master) processInitTask(mapN int, hashFunc string, mapFunc string, reduceFunc string) {
 
 }
