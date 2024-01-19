@@ -5,19 +5,23 @@ package Message
 */
 
 const (
-	Map          int = iota // map任务或map返回
-	Reduce                  // reduce返回
-	ChangeReduce            // 修正自己的状态称为reduce状态
-	AddReduce               // 新map任务完成，reduce需要异步同步
-	ReduceCommit            // 最终reduce任务确定，处理完就可以返回
+	Map    int = iota // map任务或map返回
+	Reduce            // reduce任务或完成返回
+	ClientReply
+	SlaveReply
+	NewWork
 )
 
 type Message struct {
-	From       int
-	To         int   // 发给某个节点
-	Type       int   // 消息种类
-	Wid        int   // 作业编号
-	Tid        int   // 任务编号
-	MasterAddr int   // master节点位置
-	Addrs      []int // reduce任务时使用，都去哪里获得中间数据
+	From      int      // 来自某个节点
+	To        int      // 发给某个节点
+	NeedReply bool     //是否需要回复
+	Type      int      // 消息种类
+	Gloid     int      // 任务编号
+	Wid       int      // 作业编号（客户端返回使用），总Map数量（Reduce任务使用）
+	Data      []string // 数据路径集合
+	ExecFunc  string   // 执行文件的路径
+	ExecFunc2 string   // 执行文件的路径（另一个函数，新任务使用）
+	HashFunc  string   // Hash函数的路径（map使用）
+	HashCode  int      // 哈希码（reduce使用）总哈希数量（新任务使用）
 }
