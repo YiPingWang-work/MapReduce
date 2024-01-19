@@ -18,7 +18,6 @@ type Message struct {
 	Type       int   // 消息种类
 	Wid        int   // 作业编号
 	Tid        int   // 任务编号
-	Timestamp  int   // 标识消息序列号，slave节点不应该接受任期号比其小的任务
 	MasterAddr int   // master节点位置
 	Addrs      []int // reduce任务时使用，都去哪里获得中间数据
 }

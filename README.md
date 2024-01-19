@@ -1,148 +1,152 @@
 # MapReduce基础实现
 
-### master设计逻辑
-master作为主控节点，负责所有从节点（以后称为slave）的调度。大致的，master将Map任务和reduce任务以可执行文件发送给所有自己已知的slave节点。
-
-之后master节点开始调度，首先它将数据平均分成m份，内存中将会存在数据所在的文件，之后它将这m个任务分派给m个slave，如果当前节点数量大于等于m，
-那么就分派m个，否则分派最大slave节点数量，这些数据将以文件的方式分发给各个节点。同时要实现数据流与控制流分离，这些slave节点要接受一个命令调度
-只有正确接收到命令调度并且成功回复的节点才可能被分发数据，这个命令调度数据包括自己要处理的任务类型，将会到达数据的校验ID，master的地址信息，
-以及一个时间戳，之后进行数据分发。
-
-master节点除了监控各个节点的任务回复，还要监视所有的任务的执行时间，如果时间到期，同时还有一些idle的slave，那么它将舍弃这个已经执行的任务时间
-将该任务交给另一个节点进行处理（master主观认为这个任务某个slave无法完成），同时增加超时时间。
-
-master收到一个Map的返回后，会1/2概率将这个slave留到idle队列或将它处理为新reduce节点，如果这个slave称为一个候选的slave节点，那么它将被
-进入Reduce阶段，之后每当一个Map任务完成后，它的IP就会分发给所有的Reduce节点进行处理，当所有的Map结束后，
-所有的Reduce节点会结束监听master的信息，只需要处理完自己当前的所有任务就可以正常退出了
-
-### slave逻辑
-slave接收到Map和Reduce函数后将其保存，之后一直监听主节点的命令直到终止
-
-### 注意
-这一版所有的可执行文件和数据都是以文件的方式保存在磁盘，并通过网络进行交互
-
-### 细节设计
-reduce会被预先分配，但是如果某些map任务迟迟无法完成，则考虑剥夺其执行Reduce的权利，之后让他处理Map任务
-它所处理的所有Reduce任务立即重制，已经处理玩的不算数。
-任何一个slave执行某个任务的时间过长，都会被剥夺执行该任务的权限，也就是master这里让他主观下线，其执行的任务以及结果将不再具有意义
-slave节点不会直到自己任务的和其它任务的细节，细节全部通过master进行控制
-
-### 其它碎碎念
-
-1。一次握手，证明网络互通性
-
-2。发送三个重要执行函数文件
-
-3。分派任务
-
-4。回复任务
-
-5。预分配reduce任务
-
-6。放弃预分配reduce任务
-
-7。任务已经分配完
-
-8。回复reduce任务处理完成
-
-### 我的架构设计
-依然是logic层+bottom层的设计方式。
-
-这个master必须在刚开始就可以分析出需要多少个Map和多少个Reduce任务。
-
-每个层就是一个独立的协程，通过管道通讯。
-
-这种设计方式是否有缺陷，它的并发处理能力是否是瓶颈。
-
-在第一版中使用大量数据文件传输的库函数。
-
-我希望在第二版引入无锁化的并发处理。将这个应用到RaftDB项目如何。
-
-RaftDB那个项目为了高并发，可以考虑一旦一个follower接受到一个不符合自己最新数据的信息，则将等待一段时间后再回复leader，防止大量的重复的信息传递。
 
 
-### 这个架构是否合理
-不需要等待所有的map任务完成才开始reduce，但是必须保证所有的reduce任务等到所有的map任务完成后才能结束（它必须等到所有的map任务结束后才能获取map阶段产生的数据）
+### Master逻辑：
 
-### master的主体逻辑
+#### Master存储要点
 
-1，任务切分，将整个数据集切分成多个小数据集，将这些数据集实例化为Map任务存储在自己的Map任务列表中，同时根据Map阶段可能的输出结果和Hash函数和用户需求计算出需要产生的reduce任务
+```go
+type Master struct {
+    slaves []Slave // 所有的奴隶
+    idleSlaves []int // 所有空闲奴隶的编号
+    works map[int]*Work // 所有的作业
+    msgChan chan <-chan Message // 消息 
+    timerChan chan TimerEvent // 定时器
+    timerX map[int]bool // 计时任务是否有效，里面的int指的是Gloid
+}
+type TimerEvent struct {
+    flag bool // true 普通 / false 网络
+    x int // 重试的机会，默认3次
+    msg Message // 什么命令触发的这个定时任务
+}
 
-2，设置每个任务的定时器，将任务通过某种算法分配给指定的slave节点，并指示其进行Map操作，同时开始进入计时，更新任务列表和slave节点列表
+type Slave struct {
+    sid int // 自己的ID
+    wid int // 自己正在执行的作业ID，空闲或死亡为-1 
+    tid int // 自己正在执行的作业的任务ID，空闲或死亡为-1
+    state int // 该奴隶所处的执行阶段
+}
 
-3，master将监听所有的节点的计时器状态以及是否有slave节点完成任务
+type Work struct {
+    wid int // 作业ID
+    tasks []*Task // 作业有哪些任务
+    flag int // 0 start 1 allMapFinished 2 Finished
+    finishedMap []int // 已经完成Map任务的节点
+    finishedReduce []int //已经完成Reduce任务的节点
+    doReduce []int // 正在阻塞处理reduce任务的节点
+    mapNum int // 一共的map数量
+    reduceNum int // 一共的reduce数量，len(tasks) - mapNum
+}
+
+type Task struct {
+    tid int // 我的ID
+    wid int // 我属于哪个工作
+    sid int // 哪个奴隶在执行
+    state int // 该作业所处的执行阶段
+    gloid int // 任务唯一ID，一旦更新就自增
+    Type bool // true Map / false Reduce
+    execFunc string // 执行函数文件地址，本地有不从数据库拉取
+    hashFunc string // Hash生成函数文件地址（Map阶段使用），本地有不从数据库拉取
+    hashCode int // 哈希码（Reduce阶段使用）
     
-> 如果某个节点完成任务，则master将这个完成的任务的编号以及节点的地址信息保存起来，同时它将以某个概率将这个节点设置成idle状态或者将它设置成reduce状态，同时它将这个完成的任务的节点的地址发送给所有
-> 已经设置状态为reduce的节点，说明有一个master任务已经完成，你们可以获取它的结果。如果这个节点被设置成idle，说明它还可能承担一些Map任务，只是暂时空闲（在Map任务没有完全被分配完的时候）
-> 所有的节点都会被设置成idle，之后通过master调度去获取一个新的Map任务。只有所有Map任务都被分配的时候才可能晋升为reduce节点。
+}
+```
 
-> 如果当前有许多reduce节点，此时map任务还没有执行完成，此时系统可能会消除某些reduce运行（消除代表它产生的结果将不作数，重新恢复成一个idle节点）之后接受map任务
+每当master发布一个任务，其任务的gloid都会全局自增1，slave只会处理比自己gloid高的任务（平级不处理，如果是平级同时需要回复，同时此时该任务正在处理或已经处理完，则发送一条OK消息），并且是打断式处理
 
-> 如果定时器到期，那么master将不再接受这个map任务或者reduce任务，而将这个任务进行重新指派（master主观不信任这个节点），即使最后这个节点完成任务，它任务也不将作数，它会被当成一个完成任务的节点处理
+#### porcessMapFinished 处理map结束函数（参数：wid, tid, gloid, sid）
 
-> 当所有的Map任务执行完成后，master会将所有的reduce任务进行下分给剩余的idle节点，同时给所有的reduce节点发送：map已经完成，你现在只需要处理完手头的数据就可以返回
-> master将监视reduce的返回结果，如果节点失败就重新换节点处理（和Map的逻辑一致），直到所有的reduce完成，master通知客户端任务完成
+1.通过wid, tid定位到某个任务，取出这个任务的gloid。
+
+2.如果gloid对应，同时这个任务还处于running，则说明这是一个正确执行完成的节点，
+
+​	更新作业状态：添加finishedMap <- sid，
+
+​	更新任务状态：state=finished
+
+​	更新节点状态：state=Idle, wid=-1,tid=-1，
+
+​	删除定时任务，删除相关的Gloid，
+
+3.对2，否则，如果slaves[sid].state=Dead，更新为slaves[sid].state=Idle
+
+4.接2，向所有doReduce的slave节点发送一则更新消息（finishedmap增加了）
+
+5.接2，如果此时finishedMap的长度等于mapNum，则说明该作业的所有map执行完成，将该作业状态更新为1（allMapFinished），同时给所有的doReduce节点一个定时信息，信息上添加4中的消息
+
+6.启用schedule函数，因为刚刚释放一个Idle的节点，需要调度。
+
+
+
+#### porcessReduceFinished 处理reduce结束函数（参数：wid, tid, gloid, sid）
+
+1.通过wid, tid定位到某个任务，取出这个任务的gloid。
+
+2.如果gloid对应，同时这个任务还处于running，则说明这是一个正确执行完成的节点，
+
+​	更新作业状态：添加finishedReduce <- sid，
+
+​	更新任务状态：state=finished
+
+​	更新节点状态：state=Idle, wid=-1,tid=-1
+
+​	删除定时任务，删除相关的Gloid，
+
+3.对2，否则，如果slaves[sid].state=Dead，更新为slaves[sid].state=Idle
+
+4.接2，如果此时finishedReduce的长度等于reduceNum，则说明所有的reduce执行完成，将该作业状态更新为2（Finished），同时通知client消息，告诉它所有的结果地址（finishedReduce）。
+
+6.启用schedule函数，因为刚刚释放一个Idle的节点，需要调度。
+
+
+
+#### processTimeout 处理定时器到期（参数：TimerEvent）
+
+0.查看这个定时任务是否有效，无效立即返回
+
+2.如果有效：
+
+​	2.1.如果它是一个网络超时任务或者一般超时任务但是可用次数x=0，则将slave与该任务解绑，设置slave的状态为Dead（死亡），这是任务的状态为Untreated（未执行），master认为这个任务主观下线，同时调用schedule函数，因为可能出现死锁。
+
+​	2.2.如果它是一个一般超时任务可用次数x>0（Map任务或者Reduce结束任务），则重新发送一遍该任务（msg，Gloid不变），同时要求slave节点回复（master怀疑是网络波动）设置新的定时任务它的任务Gloid和原来保持不变，但是flag变为false（网络）
+
+3.删除处理过的任务。
+
+
+
+#### processReply 处理客户端回复命令，该命令是验活后才会收到（参数：Message）
+
+这个命令发送的条件是slave收到了一个比自己大的Gloid，说明是master的网络波动
+
+master校验gloid在定时任务中是否还有这一项：（没有说明这是一个过期的消息，已经不具备意义，直接返回）
+
+1.删除定时任务（删除timerX中gloid那项）
+
+2.更新这个任务的定时器（重新设置一个普通的定时任务，任务gloid保持不变，flag设置为true，x自减）
+
+
+
+#### schedule 处理调度
+
+如果当前所有的主观存活节点都处于Reduce状态同时所有的作业中都都处于0阶段，则随机将某个执行reduce节点解绑。
+
+之后遍历所有任务，如果存在Untreated的，优先处理老的Map任务，但需要时刻保证不能陷入上述局面，在分发reduce任务的时候如果该reduce任务的作业已经处于allMapFinished状态，则增加一个定时器进程。
+
+
+
+
+
+#### 其它
+
+基础上必须保证所有slave节点都在回复master前将所有的数据存储在一个中间数据库中，且要求这个数据库是高可用的
+
 
 
 ### slave逻辑
-slave不断监听，会根据主节点发送的命令完成状态切换。直到收到了一个所有的reduce结束标识。
 
+slave如果收到个消息，会比较自己号，如果是一个较大的信息，则会中断当前任务处理，如果是一个等于自己的消息同时自己的任务已经完成，则返回一个任务完成后的响应，如果等于自己的消息或大于自己的消息此时任务未完成（不是正在进行中，是压根没见过这个命令，说明是master出现网络问题没有把消息发出来或者消息迟到），那么发送一个存活回复。
 
-### 比较棘手的问题
-如何完成解耦，也就是master将如何进行reduce阶段的划分（客户端通知，客户端给出reduce的数量，之后map阶段的返回需要给出reduce个区间推给不同的reduce数量）
+salve必须将自己的中间结果和结果成功保存在数据库才可以给master发送完成信息。
 
-### 信息处理逻辑
-数据流与控制流分离（这个要不要使用，要使用，控制流是频繁的，数据流必须等待控制流完整到达后才能进行数据传输，这里默认数据的传输是大量的，控制传输是小规模的）
-
-
-
-
-
-### Master函数逻辑表，按照收到的信息进行划分处理
-
-在新建作业逻辑的时候，一次性将所有的map作业和reduce作业配置好，之后查看是否有闲置的节点，优先分配map作业后分配reduce作业，map作业是十分快速的，是一次性的，Reduce作业是要有监听的。直到最后的终止命令。
-
-当收到了一个map完成的回复：
-
-​	如果这个作业已经过期，这个slave从dead转移到idle中，同时查看是否还有未开始的任务，选举出一个idle节点进行任务分配。
-
-​	如果这个作业没有过期，将之转换为idle状态，查看是否还有未开始的任务，选举出一个idle节点进行任务分配。同时给通知所有处理本作业的reduce阶段的slave节点可以从这个slave中获取数据。如果这个作业的所有map都已经完成处理，则通知这个作业的所有reduce节点处理完数据允许提交，附带所有的这个作业的map阶段的slave节点信息。
-
-
-
-当收到一个reduce结束信息：
-
-​	如果这个作业已经过期，这个slave从dead转移到idle中，同时查看是否还有未开始的任务，选举出一个idle节点进行任务分配。
-
-​	如果这个作业没有过期，将之转换为idle状态，查看是否还有未开始的任务，选举出一个idle节点进行任务分配。
-
-​	如果这个作业的所有reduce任务都已经完成，结束返回结果，删除所有信息。所有还在处理相关这个作业的slave全部转移到dead中去。
-
-
-
-当收到一个Map任务到期提醒：
-
-​	将该slave转到dead中去，如果当前节点还有idle状态的，分配，如果所有的节点都处于reduce状态，则选举一个处于reduce阶段的节点，强制为其分配这个map任务。
-
-当收到一个Reduce任务到期提醒：
-
-​	将该slave转到dead中去，将该任务放回未处理reduce状态。
-
-
-
-### slave逻辑：	
-
-收到一个Map清空自己状态处理map
-
-收到一个Reduce转移指令则转移为为Reduce状态，不断监听reduce命令，直到收到提交指令，如果中途收到Map直接放弃状态转移为Map，如果收到一个作业号比自己大的Reduce请求则放弃自身状态转移为命令的Reduce的状态，其它情况不做处理。
-
-
-
-处于闲置状态的slave每隔一段时间要给master发送一个心跳信息，心跳信息包括自己所处的阶段
-
-所有的通信都会附带一个时间戳，节点会互相记录时间戳，只会接受新时间戳的消息，丢弃旧时间戳的消息
-
-
-
-
-
+slave将会保存最新的处理完成信息，map处理完成或者reduce全部处理完成
