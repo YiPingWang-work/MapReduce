@@ -17,7 +17,7 @@ type Message struct {
 	To        int      // 发给某个节点
 	NeedReply bool     //是否需要回复
 	Type      int      // 消息种类
-	Gloid     int      // 任务编号
+	Gloid     uint64   // 任务编号
 	Wid       int      // 作业编号（客户端返回使用），总Map数量（Reduce任务使用）
 	DataPath  []string // 数据路径集合
 	Exec      string   // 执行文件的路径

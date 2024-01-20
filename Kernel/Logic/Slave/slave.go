@@ -2,13 +2,17 @@ package Slave
 
 import (
 	"fmt"
+	"io/ioutil"
 	"log"
+	"os"
 	"os/exec"
 )
 
 type Slave struct {
-	id       int
-	lastTask Task // 上一个成功执行的任务
+	id        int
+	lastTask  Task // 上一个成功执行的任务
+	remoteDir string
+	localDir  string
 }
 
 type Task struct {
@@ -26,13 +30,13 @@ func (s *Slave) execMap(t Task) {
 		// 写管道
 		return
 	}
-	execFunc, err := s.downloadAndSave(fmt.Sprintf("%d", t.gloid), "map_"+t.execFunc)
+	execFunc, err := s.downloadAndSave(fmt.Sprintf("%d", t.gloid), t.execFunc)
 	// 这个函数要求新建（若没有）一个目录命名为gloid，之后将后面的文件从远程下载到本地的gloid目录下，之后返回可执行文件的地址
 	if err != nil {
 		log.Println(err)
 		return
 	}
-	data, err := s.downloadAndSave(fmt.Sprintf("%d", t.gloid), "data_"+t.dataPath[0])
+	data, err := s.downloadAndSave(fmt.Sprintf("%d", t.gloid), t.dataPath[0])
 	// 这个函数要求新建（若没有）一个目录命名为gloid，之后将后面的文件从远程下载到本地的gloid目录下，之后返回数据文件的地址
 	if err != nil {
 		log.Println(err)
@@ -46,9 +50,9 @@ func (s *Slave) execMap(t Task) {
 		log.Println(err)
 	}
 
-	if err = s.upload(resultDir); err != nil {
-		log.Println(err)
-	}
+	//if err = s.upload(resultDir); err != nil {
+	//	log.Println(err)
+	//}
 	// 写管道
 }
 
@@ -56,11 +60,51 @@ func (s *Slave) execReduce() {
 
 }
 
-func (s *Slave) downloadAndSave(gloid string, path string) (string, error) {
-	return "", nil
+func (s *Slave) downloadAndSave(dir string, file string) (string, error) {
+	dir = s.localDir + "/" + dir
+	if _, err := os.Stat(dir); err != nil {
+		log.Printf("create dir %s\n", dir)
+		if err := os.MkdirAll(dir, os.ModePerm); err != nil {
+			return "", err
+		}
+	}
+	if file == "" {
+		return dir, nil
+	}
+	remoteFile := s.remoteDir + "/" + file
+	file = dir + "/" + file
+	if _, err := os.Stat(file); err != nil {
+		log.Printf("create file %s and get data from remote file %s\n", file, remoteFile)
+		content, err := ioutil.ReadFile(remoteFile)
+		if err != nil {
+			return "", err
+		}
+		err = ioutil.WriteFile(file, content, 0777)
+		if err != nil {
+			return "", err
+		}
+	}
+	return file, nil
 }
 
-func (s *Slave) upload(path string) error {
+//
+
+func (s *Slave) load(from, toDir, fileName string) error {
+	if _, err := os.Stat(toDir + "/" + fileName); err != nil {
+		log.Printf("create file %s and get data from remote file %s\n", toDir+"/"+fileName, from)
+		content, err := ioutil.ReadFile(from)
+		if err != nil {
+			return err
+		}
+		err = os.MkdirAll(toDir, 0777)
+		if err != nil {
+			return err
+		}
+		err = ioutil.WriteFile(toDir+"/"+fileName, content, 0777)
+		if err != nil {
+			return err
+		}
+	}
 	return nil
 }
 

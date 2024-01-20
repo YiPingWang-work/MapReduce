@@ -40,13 +40,16 @@ type Master struct {
 	blockSlavesNum int                    // 阻塞的节点个数
 	works          map[int]*Work          // 所有的工作
 	wid            int                    // 下一个全局workID
-	gloid          int                    // 下一个全局event ID
-	busy           map[int]Bind           // 系统中正在运行的所有任务
+	gloid          uint64                 // 下一个全局event ID
+	timerId        uint64                 // 定时事件唯一ID
+	busy           map[uint64]Bind        // 系统中正在运行的所有任务
 	fromBottomChan <-chan Message.Message // 接受消息管道
 	toBottomChan   chan<- Message.Message // 发送消息管道
-	timerEventChan chan int               // 定时事件管道
-	timerEventX    map[int]TimerEvent     // 定时事件是否有效
+	timerEventChan chan GT                // 定时事件管道
+	timerEventX    map[uint64]TimerEvent  // 定时事件是否有效
 	networkDelay   time.Duration          // 网络最高延迟
+	maxRetry       int                    // 怀疑网络阻塞的最多重试次数
+	maxWaitRound   int                    // 最多等待轮次
 }
 
 type Bind struct {
@@ -56,9 +59,9 @@ type Bind struct {
 }
 
 type Slave struct {
-	id    int // 奴隶id
-	gloid int // 当前正在处理的任务，仅当state = slave_working时有效
-	state int // 所处的状态
+	id    int    // 奴隶id
+	gloid uint64 // 当前正在处理的任务，仅当state = slave_working时有效
+	state int    // 所处的状态
 }
 
 type Work struct {
@@ -86,8 +89,15 @@ type Task struct {
 }
 
 type TimerEvent struct {
-	gloid     int           // 事件的唯一ID
-	x         int           // 允许再次尝试的次数
+	id        uint64        // 定时事件唯一ID
+	gloid     uint64        // 事件的唯一ID
+	retry     int           // 网络问题允许再次尝试的次数
+	waitRound int           // 允许执行的轮次
 	needReply bool          // 是否该事件需要回复
 	timeout   time.Duration // 事件的允许时长
+}
+
+type GT struct {
+	gloid uint64
+	eid   uint64
 }
