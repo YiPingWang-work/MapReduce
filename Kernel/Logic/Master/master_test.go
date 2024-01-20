@@ -67,7 +67,7 @@ func TestMaster(test *testing.T) {
 		Gloid:    4,
 		DataPath: []string{"4"},
 	}
-	time.Sleep(30 * time.Second)
+	time.Sleep(5 * time.Second)
 	close(ch1)
 	close(ch2)
 	for v := range ch2 {
