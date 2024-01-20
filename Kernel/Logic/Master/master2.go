@@ -2,6 +2,8 @@ package Master
 
 import (
 	"MapReduce_v0.1/Kernel/Message"
+	"fmt"
+	"log"
 	"time"
 )
 
@@ -16,10 +18,14 @@ func (m *Master) processMapFinish(gloid, sid int, dataPath string) {
 		}
 		return
 	}
+	if bind.sid != sid {
+		panic("bind error")
+	}
+	log.Printf("map finished, gloid: %d, %s\n", gloid, bind.toString())
 	delete(m.busy, gloid)
 	delete(m.timerEventX, gloid)
 	work := m.works[bind.wid]
-	work.tasks[bind.tid].state, work.tasks[bind.tid].dataPath = task_finished, dataPath
+	work.tasks[bind.tid].state = task_finished
 	work.finishedMap = append(work.finishedMap, dataPath)
 	m.slaves[sid].state = slave_idle
 	m.idleSlaves = append(m.idleSlaves, sid)
@@ -31,12 +37,13 @@ func (m *Master) processMapFinish(gloid, sid int, dataPath string) {
 			Type:      Message.Reduce,
 			Gloid:     m.slaves[v].gloid,
 			Wid:       work.mapNum,
-			Data:      work.finishedMap,
-			ExecFunc:  work.reduceExecPath,
+			DataPath:  work.finishedMap,
+			Exec:      work.reduceExec,
 			HashCode:  work.tasks[m.busy[m.slaves[v].gloid].tid].hashCode,
 		}
 	}
 	if len(work.finishedMap) == work.mapNum {
+		log.Printf("all map finished, wid: %d\n", work.id)
 		work.state = work_all_map_finished
 		m.blockSlavesNum -= len(work.doReduceSlaves)
 		for _, v := range work.doReduceSlaves {
@@ -58,22 +65,27 @@ func (m *Master) processReduceFinish(gloid, sid int, dataPath string) {
 		}
 		return
 	}
+	if bind.sid != sid {
+		panic("bind error")
+	}
+	log.Printf("reduce finished, gloid: %d, %s\n", gloid, bind.toString())
 	delete(m.busy, gloid)
 	delete(m.timerEventX, gloid)
 	work := m.works[bind.wid]
-	work.tasks[bind.tid].state, work.tasks[bind.tid].dataPath = task_finished, dataPath
+	work.tasks[bind.tid].state = task_finished
 	work.finishedReduce = append(work.finishedReduce, dataPath)
 	m.slaves[sid].state = slave_idle
 	m.idleSlaves = append(m.idleSlaves, sid)
-	if len(work.finishedMap) == work.mapNum {
+	if len(work.finishedReduce) == work.reduceNum {
 		work.state = work_finished
+		log.Printf("work finished, wid: %d. reesult is %v\n", work.id, work.finishedReduce)
 		m.toBottomChan <- Message.Message{
 			From:      m.id,
 			To:        work.client,
 			NeedReply: true,
 			Wid:       work.id,
 			Type:      Message.ClientReply,
-			Data:      work.finishedReduce,
+			DataPath:  work.finishedReduce,
 		}
 	}
 	m.schedule()
@@ -89,13 +101,15 @@ func (m *Master) processTimeout(gloid int) {
 	if !has {
 		panic("wrong timer event with no executing event")
 	}
-	if e.x == 0 || e.needReply == true { // 丧失了执行能力，这个任务被作废
+	if e.x == 0 || e.needReply { // 丧失了执行能力，这个任务被作废
+		log.Printf("timeout, task failed, gloid: %d, %v\n", gloid, bind.toString())
 		m.deadSlavesNum++
 		m.works[bind.wid].tasks[bind.tid].state = task_unexecuted
 		m.slaves[bind.sid].state = slave_dead
 		delete(m.busy, e.gloid)
 		m.schedule()
 	} else {
+		log.Printf("timout, slave need reply, gloid: %d, %v\n", e.gloid, bind.toString())
 		e.needReply = true
 		e.timeout = m.networkDelay
 		m.addTimerEvent(e)
@@ -109,14 +123,13 @@ func (m *Master) processTimeout(gloid int) {
 		}
 		if task.kind == task_map {
 			msg.Type = Message.Map
-			msg.Data = []string{task.dataPath}
-			msg.ExecFunc = work.mapExecPath
-			msg.HashFunc = work.hashPath
+			msg.DataPath = []string{task.dataPath}
+			msg.Exec = work.mapExec
 		} else {
 			msg.Type = Message.Reduce
 			msg.Wid = work.mapNum
-			msg.ExecFunc = work.reduceExecPath
-			msg.Data = work.finishedMap
+			msg.Exec = work.reduceExec
+			msg.DataPath = work.finishedMap
 			msg.HashCode = task.hashCode
 		}
 		m.toBottomChan <- msg
@@ -136,6 +149,7 @@ func (m *Master) processReplyFromSlave(gloid int) {
 		if !has {
 			panic("wrong timer event with no executing event")
 		}
+		log.Printf("slave reply. %v %v\n", bind, e)
 		if m.works[bind.wid].tasks[bind.tid].kind == task_map {
 			e.timeout = m.works[bind.wid].mapTimeout
 		} else {
@@ -149,7 +163,7 @@ func (m *Master) addTimerEvent(e TimerEvent) {
 	m.timerEventX[e.gloid] = e
 	go func() {
 		time.Sleep(e.timeout)
-		m.timerEventChan <- e.x
+		m.timerEventChan <- e.gloid
 	}()
 }
 
@@ -160,7 +174,7 @@ func (m *Master) processReplyFromClient(wid int) {
 	}
 }
 
-func (m *Master) newWork(mapExecPath, reduceExecPath, hashPath string, data []string, hashCodeNum int, from int) {
+func (m *Master) newWork(mapExecPath, reduceExecPath string, data []string, hashCodeNum int, from int) {
 	m.wid++
 	work := Work{
 		id:             m.wid,
@@ -174,9 +188,8 @@ func (m *Master) newWork(mapExecPath, reduceExecPath, hashPath string, data []st
 		mapTimeout:     time.Duration(10000) * time.Millisecond,
 		reduceTimeout:  time.Duration(10000) * time.Millisecond,
 		client:         from,
-		mapExecPath:    mapExecPath,
-		reduceExecPath: reduceExecPath,
-		hashPath:       hashPath,
+		mapExec:        mapExecPath,
+		reduceExec:     reduceExecPath,
 	}
 	for i, v := range data {
 		work.tasks = append(work.tasks, &Task{
@@ -194,12 +207,15 @@ func (m *Master) newWork(mapExecPath, reduceExecPath, hashPath string, data []st
 			hashCode: i,
 		})
 	}
+	m.works[m.wid] = &work
 	m.schedule()
 }
 
 func (m *Master) schedule() {
 	if m.blockSlavesNum+m.deadSlavesNum == len(m.slaves) {
+		log.Println("all alive slaves are block!")
 		for gloid, bind := range m.busy {
+			log.Printf("release a block slave, gloid: %d, %s\n", gloid, bind.toString())
 			m.blockSlavesNum--
 			m.works[bind.wid].tasks[bind.tid].state = task_unexecuted
 			m.slaves[bind.sid].state = slave_idle
@@ -207,6 +223,9 @@ func (m *Master) schedule() {
 			delete(m.busy, gloid)
 			break
 		}
+	}
+	if len(m.idleSlaves) == 0 {
+		return
 	}
 	for _, work := range m.works {
 		if work.state == work_finished {
@@ -230,9 +249,10 @@ func (m *Master) schedule() {
 					e := TimerEvent{gloid: m.gloid, x: 3, needReply: false, timeout: work.mapTimeout}
 					m.addTimerEvent(e)
 					msg.Type = Message.Map
-					msg.Data = []string{task.dataPath}
-					msg.ExecFunc = work.mapExecPath
-					msg.HashFunc = work.hashPath
+					msg.DataPath = []string{task.dataPath}
+					msg.Exec = work.mapExec
+					log.Printf("a new map task send to slave, gloid: %d, %v\n", m.gloid, m.busy[m.gloid].toString())
+
 				} else {
 					if work.state == work_begin {
 						m.blockSlavesNum++
@@ -242,10 +262,12 @@ func (m *Master) schedule() {
 						m.addTimerEvent(e)
 					}
 					msg.Type = Message.Reduce
-					msg.Data = work.finishedMap
-					msg.ExecFunc = work.reduceExecPath
+					msg.DataPath = work.finishedMap
+					msg.Exec = work.reduceExec
 					msg.HashCode = task.hashCode
 					msg.Wid = work.mapNum
+					log.Printf("a new reduce task send to slave, gloid: %d, %v\n", m.gloid, m.busy[m.gloid].toString())
+
 				}
 				m.toBottomChan <- msg
 			}
@@ -256,29 +278,58 @@ func (m *Master) schedule() {
 	}
 }
 
+func (m *Master) Init(myid int, slid []int,
+	fromBottomChan <-chan Message.Message, toBottomChan chan<- Message.Message) {
+	m.id = myid
+	m.slaves = []*Slave{}
+	m.idleSlaves = []int{}
+	for _, v := range slid {
+		m.slaves = append(m.slaves, &Slave{
+			id:    v,
+			gloid: -1,
+			state: slave_idle,
+		})
+		m.idleSlaves = append(m.idleSlaves, v)
+	}
+	m.deadSlavesNum, m.blockSlavesNum = 0, 0
+	m.works = map[int]*Work{}
+	m.wid, m.gloid = 0, 0
+	m.busy = map[int]Bind{}
+	m.fromBottomChan, m.toBottomChan = fromBottomChan, toBottomChan
+	m.timerEventChan = make(chan int, 100000)
+	m.timerEventX = map[int]TimerEvent{}
+	m.networkDelay = 3 * time.Second
+}
+
 func (m *Master) Run() error {
 	for {
 		select {
 		case msg, opened := <-m.fromBottomChan:
 			if !opened {
-				panic("msg chan closed")
+				log.Println("msg chan closed")
+				return nil
 			}
 			if msg.Type == Message.ClientReply {
 				m.processReplyFromClient(msg.Wid)
 			} else if msg.Type == Message.Map {
-				m.processMapFinish(msg.Gloid, msg.From, msg.Data[0])
+				m.processMapFinish(msg.Gloid, msg.From, msg.DataPath[0])
 			} else if msg.Type == Message.Reduce {
-				m.processReduceFinish(msg.Gloid, msg.From, msg.Data[0])
+				m.processReduceFinish(msg.Gloid, msg.From, msg.DataPath[0])
 			} else if msg.Type == Message.SlaveReply {
 				m.processReplyFromSlave(msg.Gloid)
 			} else if msg.Type == Message.NewWork {
-				m.newWork(msg.ExecFunc, msg.ExecFunc2, msg.HashFunc, msg.Data, msg.HashCode, msg.From)
+				m.newWork(msg.Exec, msg.Exec2, msg.DataPath, msg.HashCode, msg.From)
 			}
 		case gloid, opened := <-m.timerEventChan:
 			if !opened {
-				panic("timer event chan closed")
+				log.Println("timer event chan closed")
+				return nil
 			}
 			m.processTimeout(gloid)
 		}
 	}
+}
+
+func (b Bind) toString() string {
+	return fmt.Sprintf("wid: %d, tid: %d, sid: %d", b.wid, b.tid, b.sid)
 }

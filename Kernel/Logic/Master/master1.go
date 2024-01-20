@@ -73,9 +73,8 @@ type Work struct {
 	mapTimeout     time.Duration // map超时事件
 	reduceTimeout  time.Duration // reduce超时事件
 	client         int           // 客户端节点
-	mapExecPath    string        // map函数的地址
-	reduceExecPath string        // reduce函数的地址
-	hashPath       string        // 哈希函数地址（仅对map任务有效）
+	mapExec        string        // map函数的地址
+	reduceExec     string        // reduce函数的地址
 }
 
 type Task struct {

@@ -19,9 +19,8 @@ type Message struct {
 	Type      int      // 消息种类
 	Gloid     int      // 任务编号
 	Wid       int      // 作业编号（客户端返回使用），总Map数量（Reduce任务使用）
-	Data      []string // 数据路径集合
-	ExecFunc  string   // 执行文件的路径
-	ExecFunc2 string   // 执行文件的路径（另一个函数，新任务使用）
-	HashFunc  string   // Hash函数的路径（map使用）
+	DataPath  []string // 数据路径集合
+	Exec      string   // 执行文件的路径
+	Exec2     string   // 执行文件的路径（另一个函数，新任务使用）
 	HashCode  int      // 哈希码（reduce使用）总哈希数量（新任务使用）
 }
