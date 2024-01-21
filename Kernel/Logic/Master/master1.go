@@ -68,9 +68,9 @@ type Work struct {
 	id             int           // 工作id
 	tasks          []*Task       // 该工作下分的所有任务，它的id就是数组下标
 	state          int           // 工作所处的状态
-	finishedMap    []string      // map处理后数据地址，不包含Hash码，例如map返回的是noiacia，hash码从0到99，那么hash码是54的reduce任务需要获取的是：noiacia_54的数据
-	finishedReduce []string      // 完成的reduce任务的路径，里面有完整的hash码信息，例如作业A的hash码是54的reduce任务执行结果为A_54
-	doReduceSlaves []int         // 正在阻塞等待reduce任务的下标
+	mapResult      []string      // map处理后数据地址，不包含Hash码，例如map返回的是noiacia，hash码从0到99，那么hash码是54的reduce任务需要获取的是：noiacia_54的数据
+	reduceResult   []string      // 完成的reduce任务的路径，里面有完整的hash码信息，例如作业A的hash码是54的reduce任务执行结果为A_54
+	doReduceSlaves map[int]bool  // 正在阻塞等待reduce任务的下标
 	mapNum         int           // 该作业一共有多少个map任务
 	reduceNum      int           // 该作业有多少个reduce任务
 	mapTimeout     time.Duration // map超时事件

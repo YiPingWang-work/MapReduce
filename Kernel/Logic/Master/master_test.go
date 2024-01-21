@@ -13,7 +13,7 @@ func TestMaster(test *testing.T) {
 	ch2 := make(chan Message.Message, 100)
 	go func() {
 		m := Master{}
-		m.Init(0, []int{0, 1, 2}, 3, 4, ch1, ch2)
+		m.Init(0, []int{0, 1, 2}, 3, 4, 1000, ch1, ch2)
 		m.Run()
 		log.Println("over")
 	}()
@@ -22,60 +22,18 @@ func TestMaster(test *testing.T) {
 		From:     12,
 		To:       0,
 		Type:     Message.NewWork,
-		DataPath: []string{"hello", "hi"},
+		DataPath: []string{"hello", "hi", "zip"},
 		Exec:     "domap",
 		Exec2:    "doreduce",
 		HashCode: 2,
+		Gloid:    5000,
+		Wid:      10000,
 	}
-	time.Sleep(3 * time.Second)
-	ch1 <- Message.Message{
-		From:     0,
-		To:       0,
-		Type:     Message.Map,
-		Gloid:    1,
-		DataPath: []string{"1"},
-	}
-	time.Sleep(9 * time.Second)
-	ch1 <- Message.Message{
-		From:  1,
-		To:    0,
-		Type:  Message.SlaveReply,
-		Gloid: 2,
-	}
-	time.Sleep(14 * time.Second)
-	ch1 <- Message.Message{
-		From:  1,
-		To:    0,
-		Type:  Message.SlaveReply,
-		Gloid: 2,
-	}
-	time.Sleep(14 * time.Second)
-	ch1 <- Message.Message{
-		From:     1,
-		To:       0,
-		Type:     Message.Map,
-		Gloid:    2,
-		DataPath: []string{"2"},
-	}
-	time.Sleep(30 * time.Second)
-	ch1 <- Message.Message{
-		From:     2,
-		To:       0,
-		Type:     Message.Reduce,
-		Gloid:    3,
-		DataPath: []string{"3"},
-	}
-	ch1 <- Message.Message{
-		From:     0,
-		To:       0,
-		Type:     Message.Reduce,
-		Gloid:    4,
-		DataPath: []string{"4"},
-	}
-	time.Sleep(5 * time.Second)
+	time.Sleep(300 * time.Second)
 	close(ch1)
 	close(ch2)
+	time.Sleep(time.Second)
 	for v := range ch2 {
-		fmt.Println(v)
+		fmt.Println(v.ToString())
 	}
 }
