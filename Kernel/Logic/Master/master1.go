@@ -5,6 +5,12 @@ import (
 	"time"
 )
 
+/*
+同一时间，一个task只会和一个bind绑定，里面有唯一的gloid。
+如果一个gloid为x的bind事件已经被处理，则之后master不会再处理任何其它的gloid=x的事件。
+上述的处理指的是：删除事件或者完成事件。
+*/
+
 // work 的 state字段值
 const (
 	work_begin int = iota

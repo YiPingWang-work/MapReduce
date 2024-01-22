@@ -22,19 +22,19 @@ func TestLogic(t *testing.T) {
 	sch22 := make(chan Message.Message, 1000)
 	sch31 := make(chan Message.Message, 1000)
 	sch32 := make(chan Message.Message, 1000)
-	go fakeRoute(mch1, mch2, sch01, sch02, sch11, sch12, sch21, sch22, sch31, sch32, time.After(100*time.Second))
+	go fakeRoute(mch1, mch2, sch01, sch02, sch11, sch12, sch21, sch22, sch31, sch32, time.After(1462*time.Second))
 	go func() {
 		m := Master.Master{}
-		m.Init(0, []int{0, 1, 2, 3}, 3, 4, 2000, mch2, mch1)
+		m.Init(0, []int{0, 1, 2, 3}, 3, 4, 8000, mch2, mch1)
 		m.Run()
 		log.Println("over")
 	}()
-	go func() {
-		m := Slave.Slave{}
-		m.Init(0, 100000, sch02, sch01)
-		m.Run()
-		log.Println("over")
-	}()
+	//go func() {
+	//	m := Slave.Slave{}
+	//	m.Init(0, 100000, sch02, sch01)
+	//	m.Run()
+	//	log.Println("over")
+	//}()
 	go func() {
 		m := Slave.Slave{}
 		m.Init(1, 100000, sch12, sch11)
@@ -58,7 +58,7 @@ func TestLogic(t *testing.T) {
 		From:     12,
 		To:       0,
 		Type:     Message.NewWork,
-		DataPath: []string{"hello", "me"},
+		DataPath: []string{"hello", "me", "crut"},
 		Exec:     "domap",
 		Exec2:    "doreduce",
 		HashCode: 2,
@@ -73,7 +73,7 @@ func TestLogic(t *testing.T) {
 		DataPath: []string{"uio", "zip"},
 		Exec:     "domap",
 		Exec2:    "doreduce",
-		HashCode: 2,
+		HashCode: 3,
 		Gloid:    15000,
 		Wid:      15000,
 	}
@@ -87,9 +87,9 @@ func TestLogic(t *testing.T) {
 		Exec2:    "doreduce",
 		HashCode: 2,
 		Gloid:    15000,
-		Wid:      15000,
+		Wid:      20000,
 	}
-	time.Sleep(602 * time.Second)
+	time.Sleep(1500 * time.Second)
 	closeAndOutput(mch1)
 	closeAndOutput(mch2)
 	closeAndOutput(sch01)
@@ -121,26 +121,34 @@ func fakeRoute(mch1, mch2, sch01, sch02, sch11, sch12, sch21,
 		case msg := <-mch1:
 			if msg.To == 0 {
 				go func() {
-					time.Sleep(time.Duration(rand.Intn(60)) * time.Second)
+					t := rand.Intn(40)
+					fmt.Println("--> delay to 0:", t)
+					time.Sleep(time.Duration(t) * time.Second)
 					sch02 <- msg
 				}()
 			} else if msg.To == 1 {
 				go func() {
-					time.Sleep(time.Duration(rand.Intn(60)) * time.Second)
+					t := rand.Intn(40)
+					fmt.Println("--> delay to 1:", t)
+					time.Sleep(time.Duration(t) * time.Second)
 					sch12 <- msg
 				}()
 			} else if msg.To == 2 {
 				go func() {
-					time.Sleep(time.Duration(rand.Intn(60)) * time.Second)
+					t := rand.Intn(40)
+					fmt.Println("--> delay to 2:", t)
+					time.Sleep(time.Duration(t) * time.Second)
 					sch22 <- msg
 				}()
 			} else if msg.To == 3 {
 				go func() {
-					time.Sleep(time.Duration(rand.Intn(60)) * time.Second)
+					t := rand.Intn(40)
+					fmt.Println("--> delay to 3:", t)
+					time.Sleep(time.Duration(t) * time.Second)
 					sch32 <- msg
 				}()
 			} else {
-				fmt.Println(msg.ToString())
+				fmt.Println("* <-- ", msg.ToString())
 			}
 		case msg := <-sch01:
 			mch2 <- msg

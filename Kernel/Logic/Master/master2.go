@@ -7,7 +7,11 @@ import (
 	"time"
 )
 
-func (m *Master) Init(myid int, slid []int, maxRetry int, maxWaitRound int, networkDelay int,
+/*
+初始化master节点
+*/
+
+func (m *Master) Init(myid int, slid []int, maxRetry, maxWaitRound, networkDelay int,
 	fromBottomChan <-chan Message.Message, toBottomChan chan<- Message.Message) {
 	m.id = myid
 	m.slaves = []*Slave{}
@@ -30,14 +34,18 @@ func (m *Master) Init(myid int, slid []int, maxRetry int, maxWaitRound int, netw
 	m.networkDelay = time.Duration(networkDelay) * time.Millisecond
 }
 
-func (m *Master) Run() error {
+/*
+master循环监听，获取消息了类型，传给不同的函数，定时器到期后通知处理超时函数。
+*/
+
+func (m *Master) Run() {
 	for {
 		select {
 		case msg, opened := <-m.fromBottomChan:
 			if !opened {
 				log.Println("Master: msg chan closed")
 				log.Println(m.ToString())
-				return nil
+				return
 			}
 			if msg.To != m.id {
 				continue
@@ -57,12 +65,18 @@ func (m *Master) Run() error {
 		case gt, opened := <-m.timerEventChan:
 			if !opened {
 				log.Println("Master: timer event chan closed")
-				return nil
+				return
 			}
 			m.processTimeout(gt.gloid, gt.eid)
 		}
 	}
 }
+
+/*
+处理Map结束任务，如果当前是一个过期的任务，那么查看是否该节点标记为死亡，如果是，则复活节点为idle。
+如果是正在进行的任务，完成任务，删除任务bind，该工作添加一个map结果同时通知所有的处理这个工作reduce的slave可以增加处理一个map结果。
+如果所有的任务都已经结束，标记该任务为all map finished，之后为处理这个工作的所有reduce的slave添加定时器。
+*/
 
 func (m *Master) processMapFinish(gloid uint64, sid int, dataPath string) {
 	bind, has := m.busy[gloid]
@@ -114,11 +128,17 @@ func (m *Master) processMapFinish(gloid uint64, sid int, dataPath string) {
 	m.schedule()
 }
 
+/*
+处理reduce结束任务，如果当前是一个过期的任务，那么查看是否该节点标记为死亡，如果是，则复活节点为idle。
+如果是正在进行的任务，完成任务，删除bind，该工作添加一个reduce结果。
+如果所有的reduce任务都已经完成，则同时client工作已完成。
+*/
+
 func (m *Master) processReduceFinish(gloid uint64, sid int, dataPath string) {
 	bind, has := m.busy[gloid]
 	if !has {
 		if m.slaves[sid].state == slave_dead {
-			log.Printf("Master: slave %d realive\n", sid)
+			log.Printf("Master: slave %d revive\n", sid)
 			m.deadSlavesNum--
 			m.slaves[sid].state = slave_idle
 			m.idleSlaves = append(m.idleSlaves, sid)
@@ -152,7 +172,16 @@ func (m *Master) processReduceFinish(gloid uint64, sid int, dataPath string) {
 	m.schedule()
 }
 
-func (m *Master) processTimeout(gloid uint64, timerId uint64) {
+/*
+定时器超时函数，每个bind都有唯一一个定时器，有两种定时事件，执行超时和网络超时，如果发现一个任务执行超时，则开始网络超时定时事件，同时
+任务可执行数-1，如果网络超时重试几次后依然失败，则master认为slave下线，如果网络恢复则重新开始任务计时，网络重试次数恢复，如果多次
+执行超时则master也认为这个任务主观下线。过程中：
+一旦收到slave的回复slaveReply则取消网络定时器，开启执行定时器，
+一旦收到slave的完成标识则删除所有定时器，该任务成功完成。
+如果网络重试次数耗尽或者执行次数耗尽，该slave从working状态转移到dead状态。
+*/
+
+func (m *Master) processTimeout(gloid, timerId uint64) {
 	e, has := m.timerEventX[gloid]
 	if !has || e.id != timerId { // 定时器已经被删除
 		return
@@ -180,7 +209,7 @@ func (m *Master) processTimeout(gloid uint64, timerId uint64) {
 		log.Printf("Master: timout(1), slave need reply, bind[%d]: {%s}\n", gloid, bind.ToString())
 		e.timeout = m.networkDelay
 		e.id++
-		log.Printf("Mastert: timout(2), update event: {%s}\n", e.ToString())
+		log.Printf("Master: timout(2), update event: {%s}\n", e.ToString())
 		m.addTimerEvent(e)
 		work := m.works[bind.wid]
 		task := work.tasks[bind.tid]
@@ -205,9 +234,15 @@ func (m *Master) processTimeout(gloid uint64, timerId uint64) {
 	}
 }
 
+/*
+处理回复函数，如果slave对某个任务作出了回复，那么这个任务应该属于定时状态，如果这个任务已经消失了，那么说明该定时任务结束，master不予理睬。
+否则查看当前定时函数是否处于需要回复状态，如果不是，说明已经回复过了，这依然是过期消息，不予处理。
+否则处理，更新定时器为执行定时器。
+*/
+
 func (m *Master) processReplyFromSlave(gloid uint64) {
 	e, has := m.timerEventX[gloid]
-	if !has { // 定时器已经被删除
+	if !has {
 		return
 	}
 	if e.needReply {
@@ -230,6 +265,10 @@ func (m *Master) processReplyFromSlave(gloid uint64) {
 	}
 }
 
+/*
+收到客户端的回复，某个任务已经结束，此时master需要删除和这个任务有关的所有数据。
+*/
+
 func (m *Master) processReplyFromClient(wid int) {
 	if _, has := m.works[wid]; has {
 		// 要求数据库删除所有task保存数据的位置
@@ -237,8 +276,12 @@ func (m *Master) processReplyFromClient(wid int) {
 	}
 }
 
+/*
+客户端请求集群一个新任务，要求给出处理的文件地址，map和reduce函数和hash数量，master根据此划分map任务和reduce任务。
+*/
+
 func (m *Master) newWork(mapExecPath, reduceExecPath string,
-	data []string, hashCodeNum int, from int, mt int, rt int) {
+	data []string, hashCodeNum, from, mt, rt int) {
 	m.wid++
 	work := Work{
 		id:             m.wid,
@@ -274,6 +317,12 @@ func (m *Master) newWork(mapExecPath, reduceExecPath string,
 	m.works[m.wid] = &work
 	m.schedule()
 }
+
+/*
+调度函数，一旦出现idle的slave或者有可能使系统陷入死锁的时候调用此函数。
+首先判断是否发生阻塞（所有的存活的slave都在阻塞等待reduce事件），如果有则释放一个绑定关系，将这个slave标记为idle。
+之后随机选择一个work，按照先map后reduce取出一个map任务分配给一个idle的slave。
+*/
 
 func (m *Master) schedule() {
 	if m.blockSlavesNum+m.deadSlavesNum == len(m.slaves) {
@@ -352,6 +401,10 @@ func (m *Master) schedule() {
 		}
 	}
 }
+
+/*
+新建定时事件。结合timerEventChan和timerEventX进行定时器是否有效判断。
+*/
 
 func (m *Master) addTimerEvent(e TimerEvent) {
 	m.timerEventX[e.gloid] = e
