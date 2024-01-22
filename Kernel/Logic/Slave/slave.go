@@ -12,8 +12,8 @@ import (
 
 type Slave struct {
 	id             int
-	lastTask       Task // 上一个成功执行的任务
-	nowTask        Task // 现在正在执行的任务（仅Reduce使用）
+	lastTask       Task
+	nowTask        Task
 	remoteDir      string
 	localDir       string
 	fromBottomChan <-chan Message.Message
@@ -21,7 +21,7 @@ type Slave struct {
 	toBottomChan   chan<- Message.Message
 	timer          <-chan time.Time
 	timeout        time.Duration
-	masterId       int // master节点信息
+	masterId       int
 }
 
 type Task struct {
@@ -29,12 +29,16 @@ type Task struct {
 	wid          int
 	kind         int
 	execFunc     string
-	source       []string        // 数据源路径
-	reduceSource map[string]bool // reduce任务的执行表
-	result       string          // 结果数据路径或路径前缀
+	source       []string
+	reduceSource map[string]bool
+	result       string
 	hashCode     int
 	mapNum       int
 }
+
+/*
+初始化函数，需要指明slave的节点ID（全局唯一）和slave定时时间（过期后给master发送验活报文）
+*/
 
 func (s *Slave) Init(id int, timeout int,
 	fromBottomChan <-chan Message.Message, toBottomChan chan<- Message.Message) {
@@ -65,7 +69,11 @@ func (s *Slave) Run() {
 				log.Printf("Slave %d: task chan closed\n", s.id)
 				return
 			}
-			if s.lastTask.gloid == msg.Gloid { // 如果是上一个自己执行过的任务，立即返回一个任务已经完成
+			if !(s.nowTask.gloid == 0 && s.lastTask.gloid <= msg.Gloid ||
+				s.nowTask.gloid != 0 && s.nowTask.gloid <= msg.Gloid) {
+				continue
+			}
+			if s.lastTask.gloid == msg.Gloid {
 				s.toBottomChan <- Message.Message{
 					From:     s.id,
 					To:       s.masterId,
@@ -75,9 +83,6 @@ func (s *Slave) Run() {
 					DataPath: []string{s.lastTask.result},
 				}
 				s.timer = time.After(s.timeout)
-				continue
-			}
-			if s.lastTask.gloid > msg.Gloid || s.nowTask.gloid > msg.Gloid {
 				continue
 			}
 			if msg.Type == Message.Map {
@@ -175,7 +180,7 @@ func (s *Slave) processReduce(sources []string) (bool, error) {
 	for _, v := range sources {
 		if _, has := s.nowTask.reduceSource[v]; !has {
 			s.nowTask.reduceSource[v] = true
-			if err := s.processReduce1(s.nowTask.execFunc, v, s.nowTask.hashCode, s.nowTask.result); err != nil {
+			if err := s.processReduce1(s.nowTask.execFunc, v, s.nowTask.result); err != nil {
 				return false, err
 			} else {
 				s.nowTask.result += fmt.Sprintf("(%s)", v)
@@ -223,8 +228,7 @@ func (s *Slave) removeTask(t Task) {
 }
 
 /*
-给出执行函数，要操作的文件位置，最终结果存放的目录位置，sourceFile是远端数据，需要建立TCP长链接拉取，
-它将把文件保存为：最终存放目录/Hash码，这个目录和这个数据是在本地
+map函数设计规范：输入为两个参数，map函数将处理名为第一个参数的文件，之后将结果放在名为第二个参数的目录下。
 */
 
 func (s *Slave) processMap1(execFunc, sourceFile, resultDir string) error {
@@ -234,13 +238,12 @@ func (s *Slave) processMap1(execFunc, sourceFile, resultDir string) error {
 }
 
 /*
-给出执行函数，要操作的文件夹位置，这个reduce任务的哈希码，最终存放的文件位置，sourceDir/HashCode这个数据是在远端，需要建立TCP长链接获取
-它将取操作的文件夹/Hash码这个文件。并顺序追加写resultFile，这个文件在本地
+reduce函数设计规范：输入为两个参数，reduce将读取第一个参数的文件和第二个参数的文件，之后将处理结果写入第二个文件（更新第二个文件的内容）。
 */
 
-func (s *Slave) processReduce1(execFunc, sourceDir string, hashCode int, resultFile string) error {
-	log.Printf("Slave %d: reduce %s -> %s\n", s.id, sourceDir, resultFile)
-	time.Sleep(time.Duration(len(sourceDir)*100+rand.Intn(10000)) * time.Millisecond)
+func (s *Slave) processReduce1(execFunc, sourceFile string, resultFile string) error {
+	log.Printf("Slave %d: reduce %s -> %s\n", s.id, sourceFile, resultFile)
+	time.Sleep(time.Duration(len(sourceFile)*100+rand.Intn(10000)) * time.Millisecond)
 	return nil
 }
 
@@ -262,113 +265,3 @@ func (s *Slave) load(from, toDir, fileName string) error {
 	}
 	return nil
 }
-
-//func (s *Slave) Run2() {
-//	s.timer = time.After(s.timeout)
-//	go s.daemon()
-//	for {
-//		select {
-//		case msg, opened := <-s.taskChan:
-//			if !opened {
-//				log.Printf("Slave %d: task chan closed\n", s.id)
-//				return
-//			}
-//			if s.lastTask.gloid == msg.Gloid { // 如果是上一个自己执行过的任务，立即返回一个任务已经完成
-//				s.toBottomChan <- Message.Message{
-//					From:     s.id,
-//					To:       s.masterId,
-//					Type:     msg.Type,
-//					Gloid:    msg.Gloid,
-//					Wid:      msg.Wid,
-//					DataPath: []string{s.lastTask.result},
-//				}
-//				s.timer = time.After(s.timeout)
-//				continue
-//			}
-//			if s.lastTask.gloid > msg.Gloid || s.nowTask.gloid > msg.Gloid {
-//				continue
-//			}
-//			if msg.Type == Message.Map {
-//				s.nowTask = Task{
-//					gloid:    msg.Gloid,
-//					kind:     Message.Map,
-//					execFunc: msg.Exec,
-//					source:   msg.DataPath,
-//					result:   "M$" + msg.DataPath[0],
-//				}
-//				if err := s.processMap1("", s.nowTask.source[0], ""); err != nil { // 拉取数据，保存到本地，处理数据，保存到本地
-//					log.Println(err)
-//				} else {
-//					// 推送数据到远端
-//					s.toBottomChan <- Message.Message{
-//						From:     s.id,
-//						To:       s.masterId,
-//						Type:     Message.Map,
-//						Gloid:    msg.Gloid,
-//						DataPath: []string{s.nowTask.result},
-//					}
-//					s.timer = time.After(s.timeout)
-//					// 删除lastTask在本地保存的数据
-//					s.lastTask = s.nowTask
-//				}
-//				s.nowTask = Task{gloid: 0}
-//			} else if msg.Type == Message.Reduce {
-//				if s.nowTask.gloid == msg.Gloid { // 收到的信息是本次任务的ID，因为Reduce很可能阻塞
-//					for _, v := range msg.DataPath {
-//						if _, has := s.nowTask.reduceSource[v]; !has {
-//							s.nowTask.reduceSource[v] = true
-//							if err := s.processReduce1("", v, msg.HashCode, ""); err != nil { // 拉取数据到本地，处理，保存到本地
-//								log.Println(err)
-//							} else {
-//								s.nowTask.result += v
-//							}
-//						}
-//					}
-//					if len(msg.DataPath) == msg.Wid { // 所有reduce任务都已经完成了
-//						// 将本地数据推送到远端
-//						s.toBottomChan <- Message.Message{
-//							From:     s.id,
-//							To:       s.masterId,
-//							Type:     Message.Reduce,
-//							Gloid:    msg.Gloid,
-//							DataPath: []string{s.nowTask.result},
-//						}
-//						s.timer = time.After(s.timeout)
-//						// 删除本次数据
-//						s.lastTask = s.nowTask
-//						s.nowTask = Task{gloid: 0}
-//					}
-//				} else { // reduce新任务，此时放弃正在执行的任务，处理新任务
-//					s.nowTask = Task{
-//						gloid:        msg.Gloid,
-//						kind:         Message.Reduce,
-//						execFunc:     msg.Exec,
-//						source:       msg.DataPath,
-//						result:       "R$" + fmt.Sprintf("%d", msg.Gloid),
-//						reduceSource: map[string]bool{},
-//						hashCode:     msg.HashCode,
-//						mapNum:       msg.Wid,
-//					}
-//					for _, v := range msg.DataPath {
-//						s.nowTask.reduceSource[v] = true
-//						if err := s.processReduce1("", v, msg.HashCode, ""); err != nil { // 拉取数据到本地，处理，保存到本地
-//							log.Println(err)
-//						} else {
-//							s.nowTask.result += v
-//						}
-//					}
-//				}
-//			}
-//		case <-s.timer:
-//			log.Printf("Slave %d: check alive\n", s.id)
-//			s.toBottomChan <- Message.Message{
-//				From:     s.id,
-//				To:       s.masterId,
-//				Type:     Message.Map,
-//				Gloid:    0,
-//				DataPath: []string{""},
-//			}
-//			s.timer = time.After(s.timeout)
-//		}
-//	}
-//}

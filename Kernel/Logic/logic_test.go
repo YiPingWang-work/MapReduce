@@ -22,7 +22,7 @@ func TestLogic(t *testing.T) {
 	sch22 := make(chan Message.Message, 1000)
 	sch31 := make(chan Message.Message, 1000)
 	sch32 := make(chan Message.Message, 1000)
-	go fakeRoute(mch1, mch2, sch01, sch02, sch11, sch12, sch21, sch22, sch31, sch32, time.After(1462*time.Second))
+	go fakeRoute(mch1, mch2, sch01, sch02, sch11, sch12, sch21, sch22, sch31, sch32, time.After(462*time.Second))
 	go func() {
 		m := Master.Master{}
 		m.Init(0, []int{0, 1, 2, 3}, 3, 4, 8000, mch2, mch1)
@@ -89,7 +89,7 @@ func TestLogic(t *testing.T) {
 		Gloid:    15000,
 		Wid:      20000,
 	}
-	time.Sleep(1500 * time.Second)
+	time.Sleep(500 * time.Second)
 	closeAndOutput(mch1)
 	closeAndOutput(mch2)
 	closeAndOutput(sch01)
