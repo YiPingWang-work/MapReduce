@@ -2,151 +2,65 @@
 
 
 
-### Master逻辑：
 
-#### Master存储要点
 
-```go
-type Master struct {
-    slaves []Slave // 所有的奴隶
-    idleSlaves []int // 所有空闲奴隶的编号
-    works map[int]*Work // 所有的作业
-    msgChan chan <-chan Message // 消息 
-    timerChan chan TimerEvent // 定时器
-    timerX map[int]bool // 计时任务是否有效，里面的int指的是Gloid
-}
-type TimerEvent struct {
-    flag bool // true 普通 / false 网络
-    x int // 重试的机会，默认3次
-    msg Message // 什么命令触发的这个定时任务
-}
 
-type Slave struct {
-    sid int // 自己的ID
-    wid int // 自己正在执行的作业ID，空闲或死亡为-1 
-    tid int // 自己正在执行的作业的任务ID，空闲或死亡为-1
-    state int // 该奴隶所处的执行阶段
-}
 
-type Work struct {
-    wid int // 作业ID
-    tasks []*Task // 作业有哪些任务
-    flag int // 0 start 1 allMapFinished 2 Finished
-    finishedMap []int // 已经完成Map任务的节点
-    finishedReduce []int //已经完成Reduce任务的节点
-    doReduce []int // 正在阻塞处理reduce任务的节点
-    mapNum int // 一共的map数量
-    reduceNum int // 一共的reduce数量，len(tasks) - mapNum
-}
+### 注意	
 
-type Task struct {
-    tid int // 我的ID
-    wid int // 我属于哪个工作
-    sid int // 哪个奴隶在执行
-    state int // 该作业所处的执行阶段
-    gloid int // 任务唯一ID，一旦更新就自增
-    Type bool // true Map / false Reduce
-    execFunc string // 执行函数文件地址，本地有不从数据库拉取
-    hashFunc string // Hash生成函数文件地址（Map阶段使用），本地有不从数据库拉取
-    hashCode int // 哈希码（Reduce阶段使用）
-    
-}
+​	本版本未实现网络通讯功能和实际的计算框架，只是对相互通讯协议作出设计。
+
+
+
+### 核心逻辑
+
+​	map reduce将节点分成两部分，master节点和slave节点。master节点负责创建作业（work），划分任务（work -> tasks），分发任务（tasks -> slave）；slave节点负责执行任务。
+
+​	任务被划分成两种，map任务和reduce任务，其中map任务的执行的同步的，立即的，也就是slave节点收到后立即执行，执行后将结果返回给master。reduce任务执行的异步的，等待的，本文实现的mapreduce框架并不是等待所有的map任务执行完才去执行reduce任务，二者是可以并发执行的，master收到一个map任务的回复后，会将其告诉所有执行本workreduce任务的slave，这些slave一旦收到一个map任务，则会执行，一直到收到所有的map的执行结果，最后返回。
+
+​	具体的：
+
+#### Master逻辑：
+
+​	master收到客户端的一个work后，会将其划分成m个map任务，n个reduce任务，其中m, n是通过初始处理块和Hash函数的输出种类得到的。之后master将这m + n个任务分配给slave节点，标记任务为executing态，如果派发的是Map任务，则启动一个任务定时器。定时器到期后认为任务无法被slave完成，不再接收这个slave关于这个task的响应，并将这个task重新派发给一个空闲的slave。如果是一个reduce任务且此时该work的所有map任务还没有完成，不做处理，如果所有的map任务已经完成了，同样启动一个任务定时器，和map任务做相同处理。
+
+​	如果收到一个合法的map完成提示，则会增加完成map的数量（master会将结果地址保存在内存中），并通知所有执行该work reduce任务的slave该map任务的结果位置。如果发现这个work的所有map任务都执行完成，则会为所有执行该work reduce任务添加一个任务计时器。
+
+​	对于每次任务的执行，master为其分配一个唯一递增的编号，如果收到任务的回复和当前这个任务的编号一致，那么master就认为这是一个成功执行的任务；若小于master记录的编号，则任务master已经主观放弃了此次分配，slave执行的结果将不具有意义，master将其分配给了其他slave，master不会做任何处理；如果编号大，Panic，这种情况异常。
+
+​	关于定时器：每个分配的任务（任务的执行）会唯一拥有一个定时器，当定时器到期，master会首先检查网络问题，有三次的重传验证，如果网络没有问题，slave也正常响应，则可能是slave执行较慢，master会再次等待一段时间，再次检查网络，如果重试三次网络都是失败或者slave不响应。master才会觉得slave宕机，将该次任务的执行作废；如果slave三次正确响应但是还不回复结果，master认为这个slave不具备复杂运算的能力，即使它没有宕机，此时也会将该次任务的执行作废。
+
+​	关于reduce的两个阶段：reduce在map未完成前不需要定时器，在所有map执行结束后才会设置定时器。
+
+​	
+
+#### Slave逻辑：
+
+​	slave有两个线程，一个负责时刻回复客户端的响应，一个负责处理事件，slave会暂存上一个执行完的任务直到新任务到来。一旦收到master的响应指令，立即回送一个响应返回，证明自己还活着。slave只会接受编号大于等于自己执行任务的任务。
+
+​	如果此时slave空闲但到来一个任务是自己暂存的上一个执行完的任务，slave将立即返回暂存的任务结果。
+
+​	如果此时slave处于Reduce阶段但是收到了一个比自己阻塞等待Reduce阶段更大的编号的任务，则放弃此次任务，执行新任务。
+
+​	如果此时slave处于Reduce阶段但是收到了和自己阻塞等待Reduce阶段一致编号的任务，则比较两次任务Map任务的异同，执行缺失的Map任务结果的reduce任务，如果发现所有的map结果的reduce都已经执行完成，返回Reduce执行完成。
+
+​	当一个任务成功执行完成的话，都重写暂存任务，同时将当前任务设置为空。
+
+
+
+#### 任务数据和结果数据
+
+​	slave将使用 ``slave_id$task_id$[...]``存储在可靠的远端数据库。slave和master之间的数据传输不会传输数据，而是传输这些数据在数据库中的位置信息。
+
+
+
+
+
+### 开发文件说明
+
+```
+Kernel/Logic 中存储的是核心代码逻辑
+	  /Message 中存储的是上下交互逻辑
+	  /Logic/logic_test.go 因为没有底层网络，暂时使用channel测试代码逻辑功能
 ```
 
-每当master发布一个任务，其任务的gloid都会全局自增1，slave只会处理比自己gloid高的任务（平级不处理，如果是平级同时需要回复，同时此时该任务正在处理或已经处理完，则发送一条OK消息），并且是打断式处理
-
-#### porcessMapFinished 处理map结束函数（参数：wid, tid, gloid, sid）
-
-1.通过wid, tid定位到某个任务，取出这个任务的gloid。
-
-2.如果gloid对应，同时这个任务还处于running，则说明这是一个正确执行完成的节点，
-
-​	更新作业状态：添加finishedMap <- sid，
-
-​	更新任务状态：state=finished
-
-​	更新节点状态：state=Idle, wid=-1,tid=-1，
-
-​	删除定时任务，删除相关的Gloid，
-
-3.对2，否则，如果slaves[sid].state=Dead，更新为slaves[sid].state=Idle
-
-4.接2，向所有doReduce的slave节点发送一则更新消息（finishedmap增加了）
-
-5.接2，如果此时finishedMap的长度等于mapNum，则说明该作业的所有map执行完成，将该作业状态更新为1（allMapFinished），同时给所有的doReduce节点一个定时信息，信息上添加4中的消息
-
-6.启用schedule函数，因为刚刚释放一个Idle的节点，需要调度。
-
-
-
-#### porcessReduceFinished 处理reduce结束函数（参数：wid, tid, gloid, sid）
-
-1.通过wid, tid定位到某个任务，取出这个任务的gloid。
-
-2.如果gloid对应，同时这个任务还处于running，则说明这是一个正确执行完成的节点，
-
-​	更新作业状态：添加finishedReduce <- sid，
-
-​	更新任务状态：state=finished
-
-​	更新节点状态：state=Idle, wid=-1,tid=-1
-
-​	删除定时任务，删除相关的Gloid，
-
-3.对2，否则，如果slaves[sid].state=Dead，更新为slaves[sid].state=Idle
-
-4.接2，如果此时finishedReduce的长度等于reduceNum，则说明所有的reduce执行完成，将该作业状态更新为2（Finished），同时通知client消息，告诉它所有的结果地址（finishedReduce）。
-
-6.启用schedule函数，因为刚刚释放一个Idle的节点，需要调度。
-
-
-
-#### processTimeout 处理定时器到期（参数：TimerEvent）
-
-0.查看这个定时任务是否有效，无效立即返回
-
-2.如果有效：
-
-​	2.1.如果它是一个网络超时任务或者一般超时任务但是可用次数x=0，则将slave与该任务解绑，设置slave的状态为Dead（死亡），这是任务的状态为Untreated（未执行），master认为这个任务主观下线，同时调用schedule函数，因为可能出现死锁。
-
-​	2.2.如果它是一个一般超时任务可用次数x>0（Map任务或者Reduce结束任务），则重新发送一遍该任务（msg，Gloid不变），同时要求slave节点回复（master怀疑是网络波动）设置新的定时任务它的任务Gloid和原来保持不变，但是flag变为false（网络）
-
-3.删除处理过的任务。
-
-
-
-#### processReply 处理客户端回复命令，该命令是验活后才会收到（参数：Message）
-
-这个命令发送的条件是slave收到了一个比自己大的Gloid，说明是master的网络波动
-
-master校验gloid在定时任务中是否还有这一项：（没有说明这是一个过期的消息，已经不具备意义，直接返回）
-
-1.删除定时任务（删除timerX中gloid那项）
-
-2.更新这个任务的定时器（重新设置一个普通的定时任务，任务gloid保持不变，flag设置为true，x自减）
-
-
-
-#### schedule 处理调度
-
-如果当前所有的主观存活节点都处于Reduce状态同时所有的作业中都都处于0阶段，则随机将某个执行reduce节点解绑。
-
-之后遍历所有任务，如果存在Untreated的，优先处理老的Map任务，但需要时刻保证不能陷入上述局面，在分发reduce任务的时候如果该reduce任务的作业已经处于allMapFinished状态，则增加一个定时器进程。
-
-
-
-
-
-#### 其它
-
-基础上必须保证所有slave节点都在回复master前将所有的数据存储在一个中间数据库中，且要求这个数据库是高可用的
-
-
-
-### slave逻辑
-
-slave如果收到个消息，会比较自己号，如果是一个较大的信息，则会中断当前任务处理，如果是一个等于自己的消息同时自己的任务已经完成，则返回一个任务完成后的响应，如果等于自己的消息或大于自己的消息此时任务未完成（不是正在进行中，是压根没见过这个命令，说明是master出现网络问题没有把消息发出来或者消息迟到），那么发送一个存活回复。
-
-salve必须将自己的中间结果和结果成功保存在数据库才可以给master发送完成信息。
-
-slave将会保存最新的处理完成信息，map处理完成或者reduce全部处理完成
