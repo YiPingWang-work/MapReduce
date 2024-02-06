@@ -321,7 +321,7 @@ func (m *Master) newWork(mapExecPath, reduceExecPath string,
 /*
 调度函数，一旦出现idle的slave或者有可能使系统陷入死锁的时候调用此函数。
 首先判断是否发生阻塞（所有的存活的slave都在阻塞等待reduce事件），如果有则释放一个绑定关系，将这个slave标记为idle。
-之后随机选择一个work，按照先map后reduce取出一个map任务分配给一个idle的slave。
+之后随机选择一个work，按照先map后reduce取出一个任务分配给一个idle的slave。
 */
 
 func (m *Master) schedule() {
@@ -355,6 +355,10 @@ func (m *Master) schedule() {
 		}
 		for _, task := range work.tasks {
 			if task.state == task_unexecuted && len(m.idleSlaves) > 0 {
+				if task.kind == task_reduce && work.state == work_begin &&
+					m.blockSlavesNum+m.deadSlavesNum+1 == len(m.slaves) {
+					continue
+				}
 				m.gloid++
 				sid := m.idleSlaves[0]
 				m.idleSlaves = m.idleSlaves[1:]
